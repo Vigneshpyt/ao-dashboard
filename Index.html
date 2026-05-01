@@ -8,7 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
-const GS_URL = "https://script.google.com/macros/s/AKfycbye2jt5384hTavwmvrTHEwhISI9ryZm7ygj3IO01DREmiGaS1JuGVR_2EnE6pv-E_tGkw/exec";
+const GS_URL = "https://script.google.com/macros/s/AKfycbwU-r2YSvCEzFROTycr1o-30pOwF5txrBUCd6ctB5ppHwNmFq7M_38z9q9qqZPro7QO3Q/exec";
 </script>
 
 <style>
@@ -854,89 +854,86 @@ function loadData(){
   closeUpload();initDashboard();
 }
 
-/* ── GOOGLE SHEETS STORAGE LAYER ── */
-async function loadFromGSheets() {
-  // Multiple proxy strategies — try each until one works
-  const proxies = [
-    // Strategy 1: corsproxy.io
-    async () => {
-      const res = await fetch('https://corsproxy.io/?' + encodeURIComponent(GS_URL + '?t=' + Date.now()), { cache: 'no-store' });
-      return await res.text();
-    },
-    // Strategy 2: allorigins
-    async () => {
-      const res = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(GS_URL + '?t=' + Date.now()), { cache: 'no-store' });
-      return await res.text();
-    },
-    // Strategy 3: direct (works if Apps Script allows CORS)
-    async () => {
-      const res = await fetch(GS_URL + '?t=' + Date.now(), { redirect: 'follow', cache: 'no-store' });
-      return await res.text();
-    },
-    // Strategy 4: jsonp-style via thingproxy
-    async () => {
-      const res = await fetch('https://thingproxy.freeboard.io/fetch/' + GS_URL + '?t=' + Date.now(), { cache: 'no-store' });
-      return await res.text();
-    }
+/* ── STORAGE LAYER — Google Drive public JSON file ── */
+// GS_URL = Apps Script that writes data to a public Google Drive file
+// DRIVE_FILE_ID is set after first upload and stored in localStorage
+
+async function saveToGSheets(data) {
+  // POST to Apps Script — it saves to Sheet AND creates/updates a public Drive file
+  // Returns the Drive file ID so we can read directly next time
+  const body = JSON.stringify(data);
+  let response = null;
+
+  // Try posting directly to Apps Script
+  const attempts = [
+    () => fetch(GS_URL, { method:'POST', body, headers:{'Content-Type':'text/plain;charset=utf-8'}, redirect:'follow' }),
+    () => fetch('https://corsproxy.io/?' + encodeURIComponent(GS_URL), { method:'POST', body, headers:{'Content-Type':'text/plain;charset=utf-8'} }),
+    () => fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(GS_URL), { method:'POST', body, headers:{'Content-Type':'text/plain;charset=utf-8'} })
   ];
 
-  for (let i = 0; i < proxies.length; i++) {
+  for (const attempt of attempts) {
     try {
-      const text = await proxies[i]();
-      if (text && text.includes('"ok"') && text.includes('"data"')) {
+      const res = await attempt();
+      const text = await res.text();
+      if (text && text.includes('"ok"')) {
         const json = JSON.parse(text);
-        if (json.ok && json.data && json.data.details && json.data.details.length > 0) {
-          console.log('Loaded via strategy', i + 1);
+        if (json.ok) {
+          console.log('Saved to Google Sheets');
+          // Store file ID if returned
+          if (json.fileId) {
+            localStorage.setItem('ao_drive_file_id', json.fileId);
+            console.log('Drive file ID stored:', json.fileId);
+          }
+          return;
+        }
+      }
+    } catch(e) { console.warn('Save attempt failed:', e.message); }
+  }
+  throw new Error('All save attempts failed');
+}
+
+async function loadFromGSheets() {
+  // Strategy 1: Read from public Google Drive file (no CORS issues)
+  const fileId = localStorage.getItem('ao_drive_file_id');
+  if (fileId) {
+    try {
+      const driveUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+      const res = await fetch(driveUrl + '&t=' + Date.now(), { cache:'no-store' });
+      const text = await res.text();
+      if (text && text.includes('"details"')) {
+        const json = JSON.parse(text);
+        if (json.details && json.details.length > 0) {
+          console.log('Loaded from Google Drive file');
+          return json;
+        }
+      }
+    } catch(e) { console.warn('Drive file load failed:', e.message); }
+  }
+
+  // Strategy 2: Try Apps Script via multiple proxies
+  const proxyUrls = [
+    'https://corsproxy.io/?' + encodeURIComponent(GS_URL + '?t=' + Date.now()),
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(GS_URL + '?t=' + Date.now()),
+    'https://thingproxy.freeboard.io/fetch/' + GS_URL + '?t=' + Date.now()
+  ];
+
+  for (const url of proxyUrls) {
+    try {
+      const res = await fetch(url, { cache:'no-store' });
+      const text = await res.text();
+      if (text && text.includes('"ok"')) {
+        const json = JSON.parse(text);
+        if (json.ok && json.data && json.data.details) {
+          // Cache the file ID if returned
+          if (json.fileId) localStorage.setItem('ao_drive_file_id', json.fileId);
+          console.log('Loaded via proxy');
           return json.data;
         }
       }
-    } catch(e) {
-      console.warn('Strategy', i + 1, 'failed:', e.message);
-    }
+    } catch(e) { console.warn('Proxy load failed:', e.message); }
   }
 
-  console.warn('All load strategies failed');
   return null;
-}
-
-async function saveToGSheets(data) {
-  const body = JSON.stringify(data);
-
-  // Strategy 1: direct POST
-  try {
-    const res = await fetch(GS_URL, {
-      method: 'POST',
-      redirect: 'follow',
-      body,
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' }
-    });
-    const text = await res.text();
-    if (text.includes('"ok":true')) { console.log('Saved directly'); return; }
-  } catch(e) { console.warn('Direct save failed:', e.message); }
-
-  // Strategy 2: via corsproxy.io
-  try {
-    const res = await fetch('https://corsproxy.io/?' + encodeURIComponent(GS_URL), {
-      method: 'POST',
-      body,
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' }
-    });
-    const text = await res.text();
-    if (text.includes('"ok":true')) { console.log('Saved via corsproxy'); return; }
-  } catch(e) { console.warn('Corsproxy save failed:', e.message); }
-
-  // Strategy 3: via allorigins
-  try {
-    const res = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(GS_URL), {
-      method: 'POST',
-      body,
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' }
-    });
-    const text = await res.text();
-    if (text.includes('"ok":true')) { console.log('Saved via allorigins'); return; }
-  } catch(e) { console.warn('Allorigins save failed:', e.message); }
-
-  throw new Error('All save strategies failed — check Apps Script deployment');
 }
 
 async function tryLoadFromStorage() {
